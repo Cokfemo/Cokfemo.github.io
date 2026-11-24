@@ -45,64 +45,132 @@ footer{text-align:center;color:var(--mute);padding:24px;font-size:.85rem;border-
 <script>
 const $=s=>document.querySelector(s);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const DISPOSABLE=['mailinator.com','guerrillamail.com','10minutemail.com','tempmail.com','temp-mail.org','yopmail.com','trashmail.com','sharklasers.com','getnada.com','throwawaymail.com','maildrop.cc','dispostable.com'];
-function card(title,html){const d=document.createElement('div');d.className='card';d.innerHTML='<h3>'+title+'</h3>'+html;$('#out').appendChild(d);return d}
-async function sha256(s){const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s));return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('')}
-async function getJSON(u){const r=await fetch(u);return {status:r.status,data:r.ok?await r.json():null}}
+function card(title){const d=document.createElement('div');d.className='card';d.innerHTML='<h3>'+title+'</h3><span class="mute">Checking...</span>';d.dataset.t=title;$('#out').appendChild(d);return d}
+function setCard(c,body){c.innerHTML='<h3>'+esc(c.dataset.t)+'</h3>'+body}
+const unavailable=(c,why)=>setCard(c,'<span class="warn">Service unavailable'+(why?' ('+esc(why)+')':'')+'. Try again in a minute.</span>');
+async function sha256(s){
+  if(window.crypto&&crypto.subtle){const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s));return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('')}
+  return null}
+async function req(u,tries=2){
+  for(let i=0;i<tries;i++){
+    const ctl=new AbortController();const t=setTimeout(()=>ctl.abort(),12000);
+    try{
+      const r=await fetch(u,{signal:ctl.signal});clearTimeout(t);
+      if(r.status===429&&i<tries-1){await sleep(1800);continue}
+      let data=null;try{data=await r.json()}catch(e){}
+      return {status:r.status,data}
+    }catch(e){clearTimeout(t);if(i===tries-1)return {status:0,data:null}}
+  }
+  return {status:0,data:null}
+}
+const found=[]; // usernames discovered
+function addUser(u,src){if(u&&!found.find(x=>x.u.toLowerCase()===u.toLowerCase()))found.push({u,src})}
 
 async function breaches(email){
-  const c=card('Data breaches','<span class="mute">Checking...</span>');
-  try{
-    const {status,data}=await getJSON('https://api.xposedornot.com/v1/check-email/'+encodeURIComponent(email));
-    if(status===404||!data||!data.breaches){c.innerHTML='<h3>Data breaches</h3><span class="ok">No known breaches found for this address.</span>';return}
-    const list=(data.breaches[0]||data.breaches).filter(x=>typeof x==='string');
-    c.innerHTML='<h3>Data breaches</h3><span class="bad">Found in '+list.length+' known breach'+(list.length==1?'':'es')+'.</span> Change passwords on these services and turn on two-step verification.<div class="tags">'+list.map(x=>'<span>'+esc(x)+'</span>').join('')+'</div>';
-  }catch(e){c.innerHTML='<h3>Data breaches</h3><span class="warn">Could not reach the breach service (rate limit or network). Try again later.</span>'}
+  const c=card('Data breaches');
+  const {status,data}=await req('https://api.xposedornot.com/v1/check-email/'+encodeURIComponent(email),3);
+  if(data&&data.breaches){
+    const list=(Array.isArray(data.breaches[0])?data.breaches[0]:data.breaches).filter(x=>typeof x==='string');
+    if(list.length)return setCard(c,'<span class="bad">Found in '+list.length+' known breach'+(list.length==1?'':'es')+'.</span> Change passwords on these services and turn on two-step verification.<div class="tags">'+list.map(x=>'<span>'+esc(x)+'</span>').join('')+'</div>');
+  }
+  if(status===404||(status===200&&data&&data.Error))return setCard(c,'<span class="ok">Nothing found. No known breaches for this address.</span>');
+  if(status===200)return setCard(c,'<span class="ok">Nothing found. No known breaches for this address.</span>');
+  unavailable(c,status?'HTTP '+status:'network')
 }
 async function gravatar(email){
-  const c=card('Gravatar profile','<span class="mute">Checking...</span>');
-  try{
-    const h=await sha256(email);
-    const {status,data}=await getJSON('https://gravatar.com/'+h+'.json');
-    if(status===404||!data||!data.entry){c.innerHTML='<h3>Gravatar profile</h3><span class="ok">No public Gravatar profile.</span>';return}
-    const e=data.entry[0];
+  const c=card('Gravatar profile');
+  const h=await sha256(email);
+  if(!h)return unavailable(c,'browser cannot hash');
+  const {status,data}=await req('https://gravatar.com/'+h+'.json');
+  if(status===200&&data&&data.entry&&data.entry[0]){
+    const e=data.entry[0];addUser(e.preferredUsername,'Gravatar');
     let html='<img class="av" alt="" src="https://gravatar.com/avatar/'+h+'?s=128&d=blank">';
-    html+='<div><b>'+esc(e.displayName||e.preferredUsername||'')+'</b> (@'+esc(e.preferredUsername||'')+')</div>';
+    html+='<span class="warn">Found a public profile.</span><div><b>'+esc(e.displayName||e.preferredUsername||'')+'</b> (@'+esc(e.preferredUsername||'')+')</div>';
     if(e.currentLocation)html+='<div class="mute">'+esc(e.currentLocation)+'</div>';
     if(e.aboutMe)html+='<div class="mute">'+esc(e.aboutMe)+'</div>';
     const acc=(e.accounts||[]).filter(a=>a.url);
-    if(acc.length)html+='<div class="tags">'+acc.map(a=>'<span><a target="_blank" rel="noopener" href="'+esc(a.url)+'">'+esc(a.shortname||a.name||a.url)+'</a></span>').join('')+'</div>';
-    c.innerHTML='<h3>Gravatar profile</h3><span class="warn">Public profile found.</span>'+html;
-  }catch(e){c.innerHTML='<h3>Gravatar profile</h3><span class="warn">Could not reach Gravatar.</span>'}
+    if(acc.length)html+='<div class="mute">Linked accounts:</div><div class="tags">'+acc.map(a=>'<span><a target="_blank" rel="noopener" href="'+esc(a.url)+'">'+esc(a.shortname||a.name||a.url)+'</a></span>').join('')+'</div>';
+    return setCard(c,html)
+  }
+  if(status===404)return setCard(c,'<span class="ok">Nothing found. No public Gravatar profile.</span>');
+  unavailable(c,status?'HTTP '+status:'network')
 }
 async function github(email){
-  const c=card('GitHub accounts','<span class="mute">Checking...</span>');
-  try{
-    const {status,data}=await getJSON('https://api.github.com/search/users?q='+encodeURIComponent(email)+'+in:email');
-    if(status===403||status===429){c.innerHTML='<h3>GitHub accounts</h3><span class="warn">GitHub rate limit reached. Wait a minute and retry.</span>';return}
-    if(!data||!data.items||!data.items.length){c.innerHTML='<h3>GitHub accounts</h3><span class="ok">No GitHub account shows this email publicly.</span>';return}
-    c.innerHTML='<h3>GitHub accounts</h3><span class="warn">'+data.items.length+' account(s) publicly show this email.</span><div class="tags">'+data.items.slice(0,10).map(u=>'<span><a target="_blank" rel="noopener" href="'+esc(u.html_url)+'">'+esc(u.login)+'</a></span>').join('')+'</div>';
-  }catch(e){c.innerHTML='<h3>GitHub accounts</h3><span class="warn">Could not reach GitHub.</span>'}
+  const c=card('GitHub accounts');
+  const {status,data}=await req('https://api.github.com/search/users?q='+encodeURIComponent(email)+'+in:email');
+  if(status===200&&data){
+    const items=data.items||[];
+    if(!items.length)return setCard(c,'<span class="ok">Nothing found. No GitHub account shows this email publicly.</span>');
+    items.slice(0,10).forEach(u=>addUser(u.login,'GitHub'));
+    return setCard(c,'<span class="warn">Found '+items.length+' account(s) that publicly show this email.</span><div class="tags">'+items.slice(0,10).map(u=>'<span><a target="_blank" rel="noopener" href="'+esc(u.html_url)+'">'+esc(u.login)+'</a></span>').join('')+'</div>')
+  }
+  if(status===403||status===429)return unavailable(c,'GitHub rate limit, wait a minute');
+  unavailable(c,status?'HTTP '+status:'network')
 }
 async function domain(email){
-  const dom=email.split('@')[1].toLowerCase();
-  const c=card('Email domain','<span class="mute">Checking...</span>');
-  try{
-    const {data}=await getJSON('https://dns.google/resolve?name='+encodeURIComponent(dom)+'&type=MX');
-    const mx=(data&&data.Answer||[]).filter(a=>a.type===15).map(a=>a.data);
-    let html='<div><b>'+esc(dom)+'</b></div>';
-    html+=mx.length?'<div class="ok">Domain accepts mail. Mail servers:</div><div class="tags">'+mx.slice(0,5).map(x=>'<span>'+esc(x)+'</span>').join('')+'</div>':'<div class="bad">No mail servers found. This address probably cannot receive email.</div>';
-    if(DISPOSABLE.includes(dom))html+='<div class="warn">This is a known disposable email domain.</div>';
-    c.innerHTML='<h3>Email domain</h3>'+html;
-  }catch(e){c.innerHTML='<h3>Email domain</h3><span class="warn">Could not check the domain.</span>'}
+  const c=card('Email domain');const dom=email.split('@')[1];
+  const {status,data}=await req('https://dns.google/resolve?name='+encodeURIComponent(dom)+'&type=MX');
+  if(status!==200||!data)return unavailable(c,status?'HTTP '+status:'network');
+  const mx=(data.Answer||[]).filter(a=>a.type===15).map(a=>a.data.replace(/^\d+\s+/,'')).filter(x=>x&&x!=='.');
+  let html='<div><b>'+esc(dom)+'</b></div>';
+  html+=mx.length?'<span class="ok">Found. The domain accepts mail.</span><div class="tags">'+mx.slice(0,5).map(x=>'<span>'+esc(x)+'</span>').join('')+'</div>':'<span class="bad">No mail servers found. This address probably cannot receive email.</span>';
+  if(DISPOSABLE.includes(dom))html+='<div class="warn">This is a known disposable email domain.</div>';
+  setCard(c,html)
 }
-$('#f').addEventListener('submit',async ev=>{
-  ev.preventDefault();
-  const email=$('#email').value.trim().toLowerCase();
-  if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))return;
+// Username lookup: public profile APIs that allow browser requests. No login or reset flows are touched.
+const SITES=[
+ {n:'GitHub',url:u=>'https://api.github.com/users/'+u,page:u=>'https://github.com/'+u,ok:(s)=>s===200,no:s=>s===404},
+ {n:'GitLab',url:u=>'https://gitlab.com/api/v4/users?username='+u,page:u=>'https://gitlab.com/'+u,test:(s,d)=>s===200?(Array.isArray(d)&&d.length>0):null},
+ {n:'Codeberg',url:u=>'https://codeberg.org/api/v1/users/'+u,page:u=>'https://codeberg.org/'+u,ok:s=>s===200,no:s=>s===404},
+ {n:'DEV',url:u=>'https://dev.to/api/users/by_username?url='+u,page:u=>'https://dev.to/'+u,ok:s=>s===200,no:s=>s===404},
+ {n:'Keybase',url:u=>'https://keybase.io/_/api/1.0/user/lookup.json?usernames='+u,page:u=>'https://keybase.io/'+u,test:(s,d)=>s===200&&d?(d.them&&d.them[0]?true:false):null},
+ {n:'Lichess',url:u=>'https://lichess.org/api/user/'+u,page:u=>'https://lichess.org/@/'+u,ok:s=>s===200,no:s=>s===404},
+ {n:'Mastodon (mastodon.social)',url:u=>'https://mastodon.social/api/v1/accounts/lookup?acct='+u,page:u=>'https://mastodon.social/@'+u,ok:s=>s===200,no:s=>s===404},
+ {n:'Hacker News',url:u=>'https://hacker-news.firebaseio.com/v0/user/'+u+'.json',page:u=>'https://news.ycombinator.com/user?id='+u,test:(s,d)=>s===200?(d!==null):null}
+];
+async function checkSite(site,u){
+  const {status,data}=await req(site.url(encodeURIComponent(u)),1);
+  let r=null;
+  if(site.test)r=site.test(status,data);else if(site.ok(status))r=true;else if(site.no(status))r=false;
+  return {site,r}
+}
+async function usernames(list){
+  const c=card('Username lookup');
+  if(!list.length)return setCard(c,'<span class="ok">Nothing to look up. No usernames were found for this email. You can type a username below.</span>');
+  let html='';
+  for(const {u,src,guess} of list.slice(0,4)){
+    const res=await Promise.all(SITES.map(s=>checkSite(s,u)));
+    const hit=res.filter(x=>x.r===true),unk=res.filter(x=>x.r===null);
+    html+='<div style="margin-top:10px"><b>'+esc(u)+'</b> <span class="mute">('+(guess?'guess from the email name, may be a different person':'found via '+esc(src))+')</span>';
+    html+=hit.length?'<div class="tags">'+hit.map(x=>'<span><a target="_blank" rel="noopener" href="'+esc(x.site.page(u))+'">'+esc(x.site.n)+'</a></span>').join('')+'</div>':'<div class="ok">Nothing found on the '+res.length+' sites checked.</div>';
+    if(unk.length)html+='<div class="warn">Service unavailable for: '+unk.map(x=>esc(x.site.n)).join(', ')+'</div>';
+    html+='</div>';
+    setCard(c,html+'<div class="mute" style="margin-top:8px">Checking...</div>');
+  }
+  setCard(c,'<span class="mute">Checked '+SITES.length+' sites that publish public profile data: '+SITES.map(s=>esc(s.n)).join(', ')+'. A profile existing on a site does not prove it belongs to the owner of this email.</span>'+html)
+}
+async function run(email){
   $('#out').innerHTML='';$('#go').disabled=true;
-  await Promise.all([breaches(email),gravatar(email),github(email),domain(email)]);
-  $('#go').disabled=false;
+  try{
+    // breach check first (it rate limits at ~1 request/second), others in parallel
+    await Promise.all([breaches(email),gravatar(email),github(email),domain(email)]);
+    const list=found.map(x=>({u:x.u,src:x.src}));
+    const local=email.split('@')[0].replace(/\+.*$/,'');
+    if(/^[A-Za-z0-9_.-]{3,30}$/.test(local)&&!list.find(x=>x.u.toLowerCase()===local.toLowerCase()))list.push({u:local,src:'',guess:true});
+    await usernames(list);
+  }catch(e){
+    const d=document.createElement('div');d.className='card';d.innerHTML='<span class="warn">Something went wrong: '+esc(e&&e.message||e)+'. Please reload and retry.</span>';$('#out').appendChild(d)
+  }
+  $('#go').disabled=false
+}
+$('#f').addEventListener('submit',ev=>{
+  ev.preventDefault();found.length=0;
+  const email=$('#email').value.replace(/\s+/g,'').toLowerCase();
+  $('#email').value=email;
+  if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){$('#out').innerHTML='<div class="card"><span class="warn">That does not look like an email address. Example: name@example.com</span></div>';return}
+  run(email)
 });
 </script>
 </body>
